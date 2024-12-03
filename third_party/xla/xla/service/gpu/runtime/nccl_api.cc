@@ -19,6 +19,8 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -31,6 +33,7 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/backends/gpu/collectives/nccl_communicator.h"
 #include "xla/core/collectives/communicator.h"
+#include "xla/core/collectives/rank_id.h"
 #include "xla/primitive_util.h"
 #include "xla/service/collective_ops_utils.h"
 #include "xla/service/gpu/runtime/nccl_clique_key.h"
@@ -40,6 +43,7 @@ limitations under the License.
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/tsl/concurrency/ref_count.h"
+#include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/casts.h"
 #include "tsl/platform/errors.h"
@@ -295,7 +299,7 @@ class DefaultNcclApi final : public NcclApi {
 
   absl::StatusOr<std::vector<std::unique_ptr<Communicator>>> CommSplit(
       absl::Span<const Communicator* const> comms, int32_t color,
-      absl::Span<const int32_t> keys, std::optional<Config> config) final;
+      absl::Span<const RankId> keys, std::optional<Config> config) final;
 
   absl::Status CommAbort(Communicator* comm) final;
   absl::Status CommFinalize(Communicator* comm) final;
@@ -354,10 +358,13 @@ NcclApi* NcclApi::Default() {
 
 bool NcclApi::HasNcclSupport() { return true; }
 
-static_assert(NCCL_UNIQUE_ID_BYTES == NcclCliqueId::kSize,
-              "size of nccl unique id must match the clique id size");
-
-static ncclUniqueId AsNcclUniqueId(const NcclCliqueId& clique_id) {
+static absl::StatusOr<ncclUniqueId> AsNcclUniqueId(
+    const NcclCliqueId& clique_id) {
+  if (clique_id.size() != NCCL_UNIQUE_ID_BYTES) {
+    return Internal(
+        "CliqueId size is not equal to NCCL_UNIQUE_ID_BYTES: %d vs %d",
+        clique_id.size(), NCCL_UNIQUE_ID_BYTES);
+  }
   ncclUniqueId id;
   absl::c_copy(clique_id.data(), id.internal);
   return id;
@@ -367,7 +374,7 @@ absl::StatusOr<NcclCliqueId> DefaultNcclApi::GetUniqueId() {
   VLOG(3) << "Get NCCL unique id";
   ncclUniqueId id;
   XLA_NCCL_RETURN_IF_ERROR(ncclGetUniqueId(&id));
-  return NcclCliqueId(id.internal);
+  return NcclCliqueId(std::string_view(id.internal, NCCL_UNIQUE_ID_BYTES));
 }
 
 absl::StatusOr<std::vector<std::unique_ptr<Communicator>>>
@@ -400,9 +407,10 @@ DefaultNcclApi::CommInitRanks(int32_t nranks, const NcclCliqueId& clique_id,
             << "; fingerprint(id)=" << clique_id.fingerprint();
     auto activate_context = ranks[i].device->Activate();
 
-    XLA_NCCL_RETURN_IF_ERROR(ncclCommInitRankConfig(
-        &comm_handles[i], nranks, AsNcclUniqueId(clique_id), ranks[i].rank,
-        &comm_config));
+    TF_ASSIGN_OR_RETURN(auto nccl_unique_id, AsNcclUniqueId(clique_id));
+    XLA_NCCL_RETURN_IF_ERROR(
+        ncclCommInitRankConfig(&comm_handles[i], nranks, nccl_unique_id,
+                               ranks[i].rank.value(), &comm_config));
   }
   TF_RETURN_IF_ERROR(GroupEnd());
 
@@ -415,11 +423,15 @@ DefaultNcclApi::CommInitRanks(int32_t nranks, const NcclCliqueId& clique_id,
 
 absl::StatusOr<std::vector<std::unique_ptr<Communicator>>>
 DefaultNcclApi::CommSplit(absl::Span<const Communicator* const> comms,
-                          int32_t color, absl::Span<const int32_t> keys,
+                          int32_t color, absl::Span<const RankId> keys,
                           std::optional<Config> config) {
+  auto rank_formatter = [](std::string* str, RankId rank) {
+    absl::StrAppend(str, rank.value());
+  };
+
   VLOG(1) << absl::StreamFormat(
       "Split %d NCCL communicators using color %d and keys: [%s]", comms.size(),
-      color, absl::StrJoin(keys, ","));
+      color, absl::StrJoin(keys, ",", rank_formatter));
 
 #if !defined(TENSORFLOW_USE_ROCM) || TF_ROCM_VERSION >= 60000
   if (keys.size() != comms.size()) {
@@ -451,9 +463,9 @@ DefaultNcclApi::CommSplit(absl::Span<const Communicator* const> comms,
   for (size_t i = 0; i < comms.size(); ++i) {
     VLOG(1) << "Split NCCL communicator " << comms[i] << " with color " << color
             << " and key " << keys[i];
-    XLA_NCCL_RETURN_IF_ERROR(ncclCommSplit(Cast(comms[i]), color, keys[i],
-                                           &split_comms_handles[i],
-                                           /*config=*/comm_config_ptr));
+    XLA_NCCL_RETURN_IF_ERROR(ncclCommSplit(
+        Cast(comms[i]), color, keys[i].value(), &split_comms_handles[i],
+        /*config=*/comm_config_ptr));
   }
   TF_RETURN_IF_ERROR(GroupEnd());
 

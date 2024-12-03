@@ -42,8 +42,8 @@ limitations under the License.
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/Support/Error.h"
-#include "xla/backends/cpu/codegen/function_library.h"
 #include "xla/backends/cpu/runtime/buffer_allocations.h"
+#include "xla/backends/cpu/runtime/function_library.h"
 #include "xla/backends/cpu/runtime/thread_pool_task_runner.h"
 #include "xla/backends/cpu/runtime/thunk.h"
 #include "xla/backends/cpu/runtime/thunk_executor.h"
@@ -54,7 +54,6 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/cpu_runtime.h"
-#include "xla/service/cpu/simple_orc_jit.h"
 #include "xla/service/custom_call_status.h"
 #include "xla/service/custom_call_status_internal.h"
 #include "xla/service/executable.h"
@@ -82,24 +81,6 @@ namespace xla {
 namespace cpu {
 
 using ConstantAllocation = CpuExecutable::ConstantAllocation;
-using FunctionRegistry = CpuExecutable::FunctionRegistry;
-
-FunctionRegistry::FunctionRegistry(FunctionLibrary* function_library)
-    : function_library_(function_library) {}
-
-absl::StatusOr<FunctionRegistry::Kernel> FunctionRegistry::FindKernel(
-    std::string_view name) {
-  VLOG(3) << "Find host kernel with a name " << name;
-  using F = std::remove_pointer_t<Kernel>;
-  return function_library_->ResolveFunction<F>(name);
-}
-
-absl::StatusOr<FunctionRegistry::Comparator> FunctionRegistry::FindComparator(
-    std::string_view name) {
-  VLOG(3) << "Find comparator with a name " << name;
-  using F = std::remove_pointer_t<Comparator>;
-  return function_library_->ResolveFunction<F>(name);
-}
 
 se::DeviceMemoryBase ConstantAllocation::AsDeviceMemoryBase() const {
   if (auto* empty = std::get_if<std::monostate>(&data)) {
@@ -158,8 +139,6 @@ absl::StatusOr<std::unique_ptr<CpuExecutable>> CpuExecutable::Create(
   std::unique_ptr<CpuExecutable> executable(new CpuExecutable(
       std::move(hlo_module), std::move(hlo_profile_printer_data),
       std::move(hlo_profile_index_map), std::move(assignment)));
-
-  executable->function_registry_ = FunctionRegistry(function_library.get());
   executable->function_library_ = std::move(function_library);
 
   TF_ASSIGN_OR_RETURN(executable->thunks_,
@@ -352,7 +331,7 @@ absl::Status CpuExecutable::ExecuteThunks(
       intra_op_thread_pool ? intra_op_thread_pool->getPool() : nullptr);
 
   Thunk::ExecuteParams execute_params = {
-      &*function_registry_,
+      &*function_library_,
       &allocations,
       runtime::GetXfeedManager(runtime::GetDeviceOrdinal(run_options)),
       intra_op_thread_pool,

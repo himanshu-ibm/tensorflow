@@ -49,8 +49,8 @@ limitations under the License.
 #include "llvm/TargetParser/Host.h"
 #include "xla/backends/cpu/codegen/contiguous_section_memory_manager.h"
 #include "xla/backends/cpu/codegen/cpu_features.h"
-#include "xla/backends/cpu/codegen/function_library.h"
 #include "xla/backends/cpu/codegen/ir_compiler.h"
+#include "xla/backends/cpu/runtime/function_library.h"
 #include "xla/service/cpu/orc_jit_memory_mapper.h"
 #include "xla/util.h"
 #include "tsl/platform/cpu_info.h"
@@ -105,8 +105,8 @@ IrCompiler::TargetMachineBuilder JitCompiler::InferTargetMachineBuilder(
 }
 
 absl::StatusOr<JitCompiler> JitCompiler::Create(
-    llvm::TargetOptions target_options, llvm::CodeGenOptLevel opt_level,
-    Options options, TaskRunner task_runner) {
+    llvm::TargetOptions target_options, Options options,
+    TaskRunner task_runner) {
   // Initialize LLVM the first time `JitCompiler` is created.
   static bool llvm_initialized = [] {
     llvm::InitializeNativeTarget();
@@ -117,7 +117,8 @@ absl::StatusOr<JitCompiler> JitCompiler::Create(
 
   // Infer target machine from the current host CPU.
   IrCompiler::TargetMachineBuilder target_machine_builder =
-      InferTargetMachineBuilder(std::move(target_options), opt_level,
+      InferTargetMachineBuilder(std::move(target_options),
+                                options.ir_compiler_options.opt_level,
                                 options.max_cpu_feature);
   TF_ASSIGN_OR_RETURN(auto target_machine, target_machine_builder());
 
@@ -192,6 +193,12 @@ JitCompiler::JitCompiler(
   // Register GDB and perf event listeners with the object linking layer.
   if (gdb_) object_layer_->registerJITEventListener(*gdb_);
   if (perf_) object_layer_->registerJITEventListener(*perf_);
+
+  // Copied from LLJIT, required to find symbols on Windows.
+  if (target_machine_->getTargetTriple().isOSBinFormatCOFF()) {
+    object_layer_->setOverrideObjectFlagsWithResponsibilityFlags(true);
+    object_layer_->setAutoClaimResponsibilityForObjectSymbols(true);
+  }
 }
 
 JitCompiler::~JitCompiler() {

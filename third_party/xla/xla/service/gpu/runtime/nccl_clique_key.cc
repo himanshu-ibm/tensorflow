@@ -29,6 +29,7 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
+#include "xla/core/collectives/rank_id.h"
 #include "xla/service/global_device_id.h"
 #include "tsl/platform/logging.h"
 
@@ -65,9 +66,9 @@ absl::Span<const GlobalDeviceId> NcclCliqueKey::devices() const {
 
 NcclStreamId NcclCliqueKey::stream_id() const { return stream_id_; }
 
-std::optional<int64_t> NcclCliqueKey::rank(GlobalDeviceId id) const {
+std::optional<RankId> NcclCliqueKey::rank(GlobalDeviceId id) const {
   if (auto it = absl::c_find(devices_, id); it != devices_.end()) {
-    return it - devices_.begin();
+    return RankId(it - devices_.begin());
   }
   return std::nullopt;
 }
@@ -119,33 +120,6 @@ bool operator>(const NcclCliqueKey& a, const NcclCliqueKey& b) {
   // We still use `<` to order by stream id as we want to acquire sync cliques
   // before async ones.
   return a.stream_id_.value() < b.stream_id_.value();
-}
-
-//===----------------------------------------------------------------------===//
-// NcclCliqueId
-//===----------------------------------------------------------------------===//
-
-NcclCliqueId::NcclCliqueId() { std::fill(data_.begin(), data_.end(), 0); }
-
-NcclCliqueId::NcclCliqueId(char bytes[kSize]) {
-  std::copy(bytes, bytes + kSize, data_.data());
-}
-
-absl::StatusOr<NcclCliqueId> NcclCliqueId::FromString(std::string_view str) {
-  if (str.size() != kSize) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("Invalid NCCL clique id size: %d , expected %d bytes",
-                        str.size(), kSize));
-  }
-  char bytes[kSize];
-  std::copy(str.data(), str.data() + kSize, bytes);
-  return NcclCliqueId(bytes);
-}
-
-absl::Span<const char> NcclCliqueId::data() const { return data_; }
-
-std::string NcclCliqueId::ToString() const {
-  return std::string(data_.data(), data_.size());
 }
 
 }  // namespace xla::gpu
